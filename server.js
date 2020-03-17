@@ -1,64 +1,64 @@
-// requiring my node module dependencies
+// NPM dependencies
 var express = require("express");
 var request = require("request");
-var querystring = require("querystring");
-var path = require("path");
-
 var axios = require("axios");
-
 var cors = require("cors");
+var env = require("dotenv");
 
-// environment variable handling
-require("dotenv").config();
-var keys = require("./keys.js");
+// Native Node modules
+var querystring = require("querystring");
 
-// instantiating an express server object
+// Configure environment variable handling
+env.config();
+
+// Instantiate express server
 var app = express();
-
+// Configuring express server
 app.use(cors());
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
+
+
+app.use(express.json({ limit: 5242880 }));
+app.use(express.urlencoded({ limit: 5242880, extended: false }));
 
 const PORT = process.env.PORT || 3500;
 
-var redirect_uri = process.env.REDIRECT_URI || "http://localhost:3500/callback";
+//------------------------------------------------------------------------------
 
-var scopes = [
-    "user-top-read",
-    "user-read-recently-played",
-    "user-library-read",
-    "user-library-modify",
-    "user-read-private",
-    "user-read-birthdate",
-    "user-read-email",
-    "user-follow-read",
-    "user-follow-modify",
-    "playlist-read-private",
-    "playlist-modify-private",
-    "playlist-read-collaborative",
-    "playlist-modify-public"
-].join(" ");
+//
+app.get("/login/:auth", function(req, res) {
+    const callback = "http://localhost:3500/callback/" + req.params.auth;
+    var redirect_uri = process.env.REDIRECT_URI || callback;
+    
+    var scopes = [
+        "user-top-read",
+        "user-read-recently-played",
+        "user-library-read",
+        "user-library-modify",
+        "user-read-private",
+        "user-read-birthdate",
+        "user-read-email",
+        "user-follow-read",
+        "user-follow-modify",
+        "playlist-read-private",
+        "playlist-modify-private",
+        "playlist-read-collaborative",
+        "playlist-modify-public"
+    ].join(" ");
+    
+    var query = "https://accounts.spotify.com/authorize?" + querystring.stringify({
+        response_type: "code",
+        client_id: process.env.SPOTIFY_ID,
+        scope: scopes,
+        redirect_uri: redirect_uri
+    });
 
-var query = "https://accounts.spotify.com/authorize?" + querystring.stringify({
-    response_type: "code",
-    client_id: process.env.SPOTIFY_ID,
-    scope: scopes,
-    redirect_uri: redirect_uri
-});
-
-// console.log(query);
-
-const requestedData = {};
-
-// TODO: Add relevant params and build object with info about what data to request from Spotify
-app.get("/login", function(req, res) {
-    // populate requestedData with params
     res.redirect(query);
 });
 
-var access_token = "";
-
-app.get("/callback", function (req, res) {
+//
+app.get("/callback/:auth", function (req, res) {
+    const callback = "http://localhost:3500/callback/" + req.params.auth;
+    var redirect_uri = process.env.REDIRECT_URI || callback;
     // console.log(req.query.code);
     let code = req.query.code || null;
     let authOptions = {
@@ -76,11 +76,12 @@ app.get("/callback", function (req, res) {
         json: true
     };
     request.post(authOptions, function (error, response, body) {
-        access_token = body.access_token
-        console.log(access_token);
+        let access_token = body.access_token
+        console.log(`${req.params.auth}:\n${access_token}\n`);
         let uri = process.env.FRONTEND_URI || 'http://localhost:3000'
         // send requestedData back with redirect
-        res.redirect(uri + '?access_token=' + access_token)
+        // insert another parameter here to indicate which auth you're redirecting from
+        res.redirect(uri + '?auth=' + req.params.auth + '&access_token=' + access_token);
     });
 });
 
@@ -88,15 +89,33 @@ app.get("/callback", function (req, res) {
 // --------------------------------------------------------------------------
 
 //
-app.get("/migration-data/:token", async (req, res) => {
+const spotifyAPI_GetUser = async (token) => {
+    try {
+        const userData = await axios.get(`https://api.spotify.com/v1/me`, { headers: { Authorization: `Bearer ${token}` } });
+        return userData.data;
+    } catch (apiError) {
+        console.log(apiError);
+    }
+}
+
+// TODO: These 2 routes could be combined using an extra parameter & ternary
+//
+app.get("/new-user-data/get/:token", async (req, res) => {
+    const toClientData = await spotifyAPI_GetUser(req.params.token);
+    res.json(toClientData);
+});
+
+//
+app.get("/migration-data/get/:token", async (req, res) => {
     const toClientData = await gatherData(req.params.token);
     res.json(toClientData);
-})
+});
 
 // 
 const gatherData = async (token) => {
-    const migrationData = {};
-
+    const migrationData = {};    
+    
+    // TODO: Refactor these functions
     //
     const spotifyAPI_GetTracks = async (offset = 0, trackArray = []) => {
         try {
@@ -119,7 +138,7 @@ const gatherData = async (token) => {
                 }
             }
             // TODO: Change this to rawTrackData.Total for production
-            if (201 > trackArray.length) {
+            if (rawTrackData.total > trackArray.length) {
                 return spotifyAPI_GetTracks(offset+=50, trackArray);
             }
 
@@ -178,6 +197,7 @@ const gatherData = async (token) => {
                 for (const playlist of rawPlaylistData.items) {
                     const newPlaylistObj = {
                         name: playlist.name,
+                        id: playlist.id,
                         public: playlist.public,
                         collab: playlist.collaborative,
                         description: playlist.description,
@@ -194,6 +214,7 @@ const gatherData = async (token) => {
             }
 
             return playlistArray;
+
         } catch (apiError) {
             console.log(apiError);
         }
@@ -227,12 +248,16 @@ const gatherData = async (token) => {
             }
 
             return followingArray;
+
         } catch (apiError) {
             console.log(apiError);
         }
     }
     
+    // If a token is provided, call each function above and populate the migrationData object
     if (token) {
+        const userData = await spotifyAPI_GetUser(token);
+        migrationData["user"] = userData;
 
         const trackData = await spotifyAPI_GetTracks();
         migrationData["savedTracks"] = trackData;
@@ -248,79 +273,297 @@ const gatherData = async (token) => {
     }
 
     return migrationData;
-
-    // const endpoints = [
-    //     { key: "user", endpoint: "" },
-    //     // { key: "recentlyPlayed", endpoint: "/player/recently-played?limit=50" },
-    //     { key: "savedTracks", endpoint: "/tracks?limit=50" },
-    //     // { key: "savedAlbums", endpoint: "/albums" },
-    //     // { key: "playlists", endpoint: "/playlists" }
-    //     // { key: "following", endpoint: "/following?type=artist&limit=50" }
-    // ];
-
-    // // Nesting a function inside another is called CLOSURE. It's helpful in this situation because it allows me to localize the instantiation
-    // // of the migrateData object, rather than trying to manage it globally and I know it will always be in scope when spotifyAPI_Get is called
-    // const spotifyAPI_Get = async (endpoint, key) => {
-    //     // let offset = 0;
-    //     try {
-    //         const apiData = await axios.get(`https://api.spotify.com/v1/me${endpoint}`, { headers: { Authorization: `Bearer ${token}` } });
-            
-    //         // Check to see if there's more data to pull
-    //         // not applicable to user data
-    //         // applicable to tracks, albums, followed artists/users
-            
-    //         // build full data object to be added to migrationData            
-    //         // structure data appropriately
-
-    //         // const rawData = apiData.data;
-    //         // const structuredData = await structureData(rawData, key);
-    //         // change this assignment to structuredData
-    //         migrationData[key] = apiData.data;
-    //     } catch (apiError) {
-    //         console.log(apiError.data);
-    //     }
-    // };
-
-    // const structureData = (rawData, key) => {
-    //     switch(key) {
-    //         case "recentlyPlayed":
-    //             structureRecentlyPlayed();
-    //             break;
-    //     }
-    // }
-
-
-        // await axios.get("https://api.spotify.com/v1/me/player/recently-played", { headers: { Authorization: `Bearer ${token}` } }).then(response => {
-        //     migrationData["recentlyPlayed"] = response.data;
-        // });
-
-        // TODO: Is this strategy more efficient???
-
-        // TODO: These are returning 20 results only - that's okay for api funtionality prototyping, but will eventually need to be refactored into
-        //       functions that iterate to grab all available data
-        // try {            
-        //     const userData = await axios.get("https://api.spotify.com/v1/me", { headers: { Authorization: `Bearer ${token}` } });
-        //     migrationData["user"] = userData.data;
-    
-        //     const recentlyPlayedData = await axios.get("https://api.spotify.com/v1/me/player/recently-played", { headers: { Authorization: `Bearer ${token}` } });
-        //     migrationData["recentlyPlayed"] = recentlyPlayedData.data;
-    
-        //     const savedTracksData = await axios.get("https://api.spotify.com/v1/me/tracks", { headers: { Authorization: `Bearer ${token}` } });
-        //     migrationData["savedTracks"] = savedTracksData.data;
-    
-        //     const savedAlbumsData = await axios.get("https://api.spotify.com/v1/me/albums", { headers: { Authorization: `Bearer ${token}` } });
-        //     migrationData["savedAlbums"] = savedAlbumsData.data;            
-            
-        //     const playlistsData = await axios.get("https://api.spotify.com/v1/me/playlists", { headers: { Authorization: `Bearer ${token}` } });
-        //     migrationData["playlists"] = playlistsData.data;
-
-        //     const followingData = await axios.get("https://api.spotify.com/v1/me/following", { headers: { Authorization: `Bearer ${token}` } });
-        //     migrationData["following"] = followingData.data;
-        // } catch (err) {
-        //     console.log(err);
-        // }
 }
 
+// may need to refactor the playlist POST out into its own route to stay restful
+app.put("/migration-data/put/:token/:new_user_id", async (req, res) => {
+    const { token, new_user_id } = req.params;
+    console.log("Entering into toClientPutData...\n");
+
+    const toClientPutData = await putData(token, new_user_id, req.body);
+
+    console.log("Exiting toClientPutData...\n");
+    // console.log(toClientPutData);
+
+    res.json(toClientPutData);
+});
+
+//
+const putData = async (token, newUserID, data) => {
+    const migrateResults = {};
+    
+    //
+    const spotifyAPI_PutTracks = async (trackData, index=0) => {
+        try {           
+            const recurse = ((trackData.length - 1) - (index + 50)) > 0;
+            
+            const offset = recurse ? 49 : (trackData.length - index) - 1;
+            var tracksThisQuery = "";
+            
+            for (var i = index; i < (index + offset); i++) {
+                tracksThisQuery+=`${trackData[i].id},`
+            }            
+            tracksThisQuery+=`${trackData[(index + offset)].id}`;
+
+            var putStatus;
+            await axios.put(
+                `https://api.spotify.com/v1/me/tracks?ids=${tracksThisQuery}`,
+                {},
+                { headers: { Authorization: `Bearer ${token}` } }
+            ).then(response => putStatus = response.status);
+
+            if (recurse) {
+                return spotifyAPI_PutTracks(trackData, index+=50);
+            }
+
+            return putStatus;
+
+        } catch (apiError) {
+            console.log("API ERROR:\n\n", apiError);
+        }
+    }
+
+    //
+    const spotifyAPI_PutAlbums = async (albumData, index=0) => {
+        try {           
+            const recurse = ((albumData.length - 1) - (index + 50)) > 0;
+            
+            const offset = recurse ? 49 : (albumData.length - index) - 1;
+            var albumsThisQuery = "";
+            
+            for (var i = index; i < (index + offset); i++) {
+                albumsThisQuery+=`${albumData[i].id},`
+            }            
+            albumsThisQuery+=`${albumData[(index + offset)].id}`;
+
+            var putStatus;
+            await axios.put(
+                `https://api.spotify.com/v1/me/albums?ids=${albumsThisQuery}`,
+                {},
+                { headers: { Authorization: `Bearer ${token}` } }
+            ).then(response => putStatus = response.status);
+
+            if (recurse) {
+                return spotifyAPI_PutAlbums(albumData, index+=50);
+            }
+
+            return putStatus;
+
+        } catch (apiError) {
+            console.log("API ERROR:\n\n", apiError);
+        }
+    }
+
+    //
+    const spotifyAPI_PutArtists = async (artistData, index=0) => {
+        try {           
+            const recurse = ((artistData.length - 1) - (index + 50)) > 0;
+            
+            const offset = recurse ? 49 : (artistData.length - index) - 1;
+            var artistsThisQuery = "";
+            
+            for (var i = index; i < (index + offset); i++) {
+                artistsThisQuery+=`${artistData[i].id},`
+            }            
+            artistsThisQuery+=`${artistData[(index + offset)].id}`;
+
+            var putStatus;
+            await axios.put(
+                `https://api.spotify.com/v1/me/following?type=artist&ids=${artistsThisQuery}`,
+                {},
+                { headers: { Authorization: `Bearer ${token}` } }
+            ).then(response => {
+                console.log(response);
+                return putStatus = response.status;
+            });
+
+            if (recurse) {
+                return spotifyAPI_PutArtists(artistData, index+=50);
+            }
+
+            return putStatus;
+
+        } catch (apiError) {
+            console.log("API ERROR:\n\n", apiError);
+        }
+    }
+
+    //
+    const spotifyAPI_PostPlaylists = async (playlistData) => {
+        const playlistPostResults = {};
+
+        const buildPostError = (axiosErrorRes, originalPlaylistID="") => {
+            const errObj = {
+                status: axiosErrorRes.response.status,
+                text: axiosErrorRes.response.statusText,
+                message: axiosErrorRes.response.data.error.message,
+                originalID: originalPlaylistID
+            };
+            return errObj;
+        }
+
+        //
+        const spotifyAPI_GetPlaylistTracks = async (trackQuery, offset=0, trackArray=[]) => {
+            try {
+
+                // TODO: add fields to get more specific json response
+                const trackData = await axios.get(
+                    `${trackQuery}?limit=50&offset=${offset}`,
+                    { headers: { Authorization: `Bearer ${token}` } }
+                );
+
+                const rawTrackData = trackData.data;
+
+                if (rawTrackData.items) {
+                    for (const track of rawTrackData.items) {
+                        trackArray.push(track.track.uri)
+                    }
+                }
+
+                if (rawTrackData.total > trackArray.length) {
+                    return spotifyAPI_GetPlaylistTracks(trackQuery, offset+=50, trackArray);
+                }
+
+                return trackArray;
+
+            } catch (apiError) {
+                // tailor the error handling here too
+                console.log(apiError);
+            }
+        }
+        
+        //
+        const spotifyAPI_PostPlaylistTracks = async (originID, playlistTrackArray, id, index=0) => {
+            try {
+
+                // Incrementing through the playlistTrackArray by 40 rather than 50 like the functions above
+                // because this POST method requires a comma separated list of track URIs rather than IDs -
+                // URIs contain extra characters so I want to stay safely within the bounds of the HTTP URL
+                // limit. - DP, 3.16.20
+                
+                const recurse = ((playlistTrackArray.length - 1) - (index + 40)) > 0; // if true, we need to recurse
+
+                const offset = recurse ? 39 : (playlistTrackArray.length - index) - 1;
+                var tracksThisQuery = "";
+
+                for (var i = index; i < (index + offset); i++) {
+                    tracksThisQuery += `${playlistTrackArray[i]},`
+                }
+                tracksThisQuery += `${playlistTrackArray[(index + offset)]}`;
+
+                var postStatus;
+
+                await axios.post(
+                    `https://api.spotify.com/v1/playlists/${id}/tracks?uris=${tracksThisQuery}`,
+                    {},
+                    { headers: {
+                        Authorization: `Bearer ${token}`,
+                        "Content-Type": "application/json"
+                    }}
+                ).then(response => {
+                    const postSuccessObj = {
+                        status: response.status,
+                        text: response.statusText,
+                        data: response.data
+                    }
+                    console.log(postSuccessObj);
+                    postStatus = postSuccessObj;
+                });
+
+                if (recurse) {
+                    return spotifyAPI_PostPlaylistTracks(playlistTrackArray, id, index += 40);
+                }
+
+                return postStatus;
+
+            } catch (apiError) {
+
+                var deletionData;
+
+                await axios.delete(
+                    `https://api.spotify.com/v1/playlists/${id}/followers`,
+                    { headers: { Authorization: `Bearer ${token}` }}
+                ).then(delRes => {
+                    console.log(delRes.status);
+                    deletionData = delRes;
+                });
+
+                const error = buildPostError(apiError);
+                error.originalID = originID;
+                error.playlistRemoved = deletionData.status === 200 ? true : false;
+
+                return error;
+            }
+        }
+
+        //
+        const buildPlaylist = async (playlistObj) => {
+            try {
+                const postRes = await axios.post(
+                    `https://api.spotify.com/v1/users/${newUserID}/playlists`,
+                    {
+                        name: playlistObj.name,
+                        public: playlistObj.public,
+                        collaborative: playlistObj.collab,
+                        description: playlistObj.description
+                    },
+                    {headers: {
+                        Authorization: `Bearer ${token}`,
+                        "Content-Type": "application/json"
+                    }}
+                );
+    
+                const playlistID = postRes.data.id;
+                console.log(`Playlist ID: ${playlistID}\n`);
+        
+                console.log("Entering getPlaylistTracks...\n");
+                const playlistTracks = await spotifyAPI_GetPlaylistTracks(playlistObj.tracksInfo.href);
+                console.log("Exiting getPlaylistTracks...\n");
+        
+                // if getting the tracks was a success, then post
+        
+                console.log("Entering postPlaylistTracks...\n");
+                const postTracksStatus = await spotifyAPI_PostPlaylistTracks(playlistObj.id, playlistTracks, playlistID);
+                console.log("Exiting postPlaylistTracks...\n");
+        
+                // if the response code is bad, remove the playlist
+    
+                playlistPostResults[playlistID] = postTracksStatus;
+    
+            } catch (apiError) {
+                console.log(apiError);
+            }    
+        }
+        
+        for (playlist of playlistData) {
+            await buildPlaylist(playlist);
+        }
+
+        // await buildPlaylist(playlistData[50]);
+
+        return playlistPostResults;
+    }
+    
+    const { user, savedTracks, savedAlbums, following, playlists } = data;
+
+    if (token) {
+        const putTracksStatus = await spotifyAPI_PutTracks(savedTracks);
+        migrateResults["putTracks"] = putTracksStatus;
+
+        const putAlbumsStatus = await spotifyAPI_PutAlbums(savedAlbums);
+        migrateResults["putAlbums"] = putAlbumsStatus;
+
+        const putArtistsStatus = await spotifyAPI_PutArtists(following);
+        migrateResults["putArtists"] = putArtistsStatus;
+        
+        const postPlaylistsStatus = await spotifyAPI_PostPlaylists(playlists);
+        migrateResults["postPlaylists"] = postPlaylistsStatus;
+    }
+
+    return migrateResults;
+}
+
+//
 app.listen(PORT, function() {
-    console.log("Server listening on PORT: " + PORT);
+    console.log(`\nServer listening on PORT: ${PORT}\n`);
 });
